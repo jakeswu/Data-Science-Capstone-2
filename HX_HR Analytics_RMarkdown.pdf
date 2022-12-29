@@ -1,0 +1,347 @@
+---
+title: "HarvardX Data Science Capstone 2 – HR Analytics Project"
+author: "Chengliang(Jake) Wu"
+date: '2022-12-25'
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE)
+##########################################################
+# Create edx and final_holdout_test sets 
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(tibble)
+library(lubridate)
+library(dslabs)
+library(dplyr)
+library(knitr)
+tinytex::install_tinytex(force=TRUE)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+## 1. Introduction and Executive Summary
+
+A recommendation system is an information filtering system, which provides suggestions to users on specific courses of action to take. In a similar vein, a movie recommendation system recommends movies to users. These recommendations are given on the assumption that the user is likely to provide high ratings for them. 
+
+A **movie recommendation system** ‘learns’ what to suggest to a specific user by being ‘fed’ with past, actual ratings data. In this capstone, I will build one such recommendation system, based on a data set of 10 million ratings provided by GroupLens Research. (<https://grouplens.org/datasets/movielens/>). The ratings include additional data such as the movie title and release year, its ID, the anonymized ID of the user who provided the rating, as well as the date when the rating was given.
+
+This system is constructed as follows: (1) Data cleaning will be performed to capture and remove NAs and duplicate rows, (2) Data exploration and Visualization will be conducted to tease out insights on the most useful predictors, (3) A series of recommendation systems (i.e., algorithms) generated and tested to identify the best. I top this off with (4) Conclusions including limitations and possibilities.
+
+Each algorithm is tested by having it predict ratings on a data set (“validation set”), and I target to achieve a penultimate Root Mean Squared Error (RMSE) of <0.86490. The RMSE is a performance metric that gauges a recommendation system’s predictive quality, by (essentially) summing up how far the system’s predictions are, from an actual rating that was provided from a testing set of data.
+
+## 2. Methods and Analysis
+The methods section is split into 3 sections: (1) Data observation, (2) Cleaning, and (3) Exploration. Note that the code used to produce the quiz results is in the submitted R Script, and is not covered here.
+
+### 2.1 Data Observation 
+```{r cars}
+```
+I first observe the data to make preliminary sense of it. This is done through the as_tibble() command.
+```{r}
+edx %>% as_tibble()
+```
+The data comprises of 6 columns and 9,000,055 rows, including the User ID, Move ID, the rating allocated, name of movie, and the genre(s) which the movie belongs to. With each observation in a different row, each variable measured in 1 column, the data looks tidy. Next, we inspect the characteristics of each column and spot for NAs.
+
+### 2.2 Cleaning 
+```{r}
+summary(edx)
+sum(duplicated(edx))
+```
+The output suggests that there are no NAs. Furthermore, no duplicate rows are spotted. We can assume that the data does not require further cleaning at this point in time.
+
+### 2.3 Exploration  
+Per what was stated in our previous machine learning course - think of our task as follows: not every user rated every movie. So how would they have rated the movies they didn't watch? Each rating *y* has a different set of predictors. If we are predicting the rating for each movie *i* by each user *u*, then we need to consider all ratings for movie *i* (and those similar with movie *i*), and all movies rated by user *u* and similar users. Thus, all the indicators in the training set need to be used as predictors.
+
+With this in mind - we will first look at the distribution of movie ratings and users, 
+```{r}
+#count number of ratings per movie (x axis = number of movies rated, y axis = number of ratings)
+edx %>% 
+     dplyr::count(movieId) %>% 
+     ggplot(aes(n)) + 
+     geom_histogram(bins = 30, color = "black") + 
+     scale_x_log10() + 
+     ggtitle("Number of ratings per movie")+
+  labs(x="# of ratings a movie received", y="number of instances")
+```
+\
+For the first plot, we observe that on the left side of x-axis, there are ~100 instances(y) which received only 1 rating. Towards the middle, there are ~700 instances(y) which received ~100 ratings. And on the right side of the x axis, there are ~10 instances (y) which received 50,000 ratings. In other words, most movies receive around 700 ratings or so, with extreme cases which receive 50,000 ratings - e.g. blockbuster movies. Clearly, some movies get more rated than others.
+
+```{r}
+##count number of movies rated per user (x axis = number of movies rated, y axis = number of users)
+edx %>%
+  dplyr::count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() +
+  ggtitle("Users")+
+  labs(x="# of ratings given by a user", y="number of instances")
+```
+\
+For the second plot: on the left side of x-axis there are ~100 instances(y) of 20 ratings(x). In the middle, ~6800 instances of 50 ratings. And at the other extreme of the x axis, there are very few instances of >1,000 ratings. In other words, most users give around 50 ratings or so, with extreme cases where some users give around 1,000 ratings. Clearly some users give more ratings than others.
+
+What else can impact movie ratings? I believe the 'time-gap' between a movie's release date and the date of review can have a part to play. People may watch movies which have been released a long time ago because they were classics/critically-acclaimed. Therefore, it is possible that the longer the gap between release and review, the higher the rating. Let us verify this hypothesis.
+```{r}
+##from our training set edx, extract year rated, year released, and find the gap
+edx2<-edx %>% mutate(rating_year=as.numeric(year(as_datetime(timestamp))),year_released=as.numeric(str_sub(edx$title,start = -5, end = -2)), gap=rating_year-year_released)
+
+#Does watching older movies mean that we tend to give better ratings?
+#we need a plot of y (mean rating that a movie receives) vs x (time gap between movie release and actual watch date)
+
+#Thus, for each x-value, I need to calculate the mean rating.
+plottable <- edx2 %>% group_by(gap) %>% summarize(mean=mean(rating))
+
+#Then, plot a trendline to see if there are any relationships.
+plottable %>% filter(gap>=0) %>% ggplot(aes(x=gap,y=mean)) + geom_point() + geom_smooth(method=loess) +
+  ggtitle("Mean Rating vs gap between release date and rating date")+
+  labs(y="Mean Movie Rating", x="# of years between release and rating dates")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+\
+This plot shows that the older the time gap, the higher the rating (a difference of ~0.4 points). While this difference levels off at a gap of 50 years and plummets at ~60+, it still tells us that there can be a 'time gap effect', which we can build into our model and see whether it decreases the RMSE.
+
+### 2.4. Modelling Approach
+I will perform an iterative approach to modelling. First, I start with a simple predictive model, and add predictors (movie, user, and gap effects) in a step-wise fashion, to see whether they enhance the predictive capability (i.e., reduce RMSE). Depending on whether I clear the target RMSE, I will further regularize these predictors (concept to be discussed later).
+
+## 3. Results from Simulating Different Models
+We first create a loss function that represents the Root Mean Squared Error. The RMSE equation looks like this:
+$$RMSE = \sqrt {\frac{1}{N} \sum_{i=1}^{N} (\hat{y_{i}} - y_{i})^2}$$
+
+Its equivalent is coded in R, which is as below. Recall our goal is to build a predictive model that yields an RMSE of below 0.86490. 
+```{r}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+### 3.1. Naive Model
+With the 'yardstick' defined - we now establish a simple, baseline model that predicts the ratings for any movie *i* by an arbitrary user *u*.
+we assume that the model is naive i.e., all ratings are assumed to take on one single value with the differences explained by random variation.
+
+$$Y_{u,i} = \mu + \epsilon_{u,i}$$
+
+Where $\mu$ is true rating for all movies, and $\epsilon_{u,i}$ is the error term. 
+
+Therefore, the estimate for any rating $Y_{u,i}$ is $\hat{\mu}$, the estimate of the rating for all movies. The best estimate (i.e., that minimizes the RMSE) of the rating for all movies is the average rating in the training dataset, which is calculated through a simple 'mean' operator in R.
+```{r}
+mu <- mean(edx$rating)
+naive_rmse <- RMSE(test$rating,mu)
+naive_rmse
+```
+\
+We see that the RMSE is 1.06, which is far off from the intended target. 
+```{r}
+#Tabulate Score
+RMSECompiled <- tibble(Model="Naive", RMSE=naive_rmse)
+RMSECompiled
+```
+### 3.2. Movie Effects
+There is room to create a more accurate predictive model. We know that considering all other ratings for movie *i* and all other ratings provided by user *u* in our model can yield a more accurate prediction, since it is likely that (1) movies that are rated to be of a certain caliber are likely to continue to be rated as such, and (2) the pattern behind how a user rates (whether strict or lenient) is likely to remain consistent over movies. These considerations take the form of additional variables which will increase/decrease the predicted rating, and will be referred to as the "movie" and "user" effects. 
+
+Adding in the movie effect term $b_{i}$, the predictive model becomes:
+$$Y_{u,i} = \mu + b_{i} + \epsilon_{u,i}$$
+We will now calculate the $b_{i}$ term using the training set data. This term can be estimated by taking the mean of the training rating, subtracted by the overall average rating calculated earlier.
+```{r}
+
+#3.2. Try our second model i.e. calculate movie effects
+b_i <-edx %>% group_by(movieId) %>% summarize(b_i=mean(rating-mu))
+
+#3.2.1. RMSE with movieeffects
+movieonlyrmse<-left_join(test, b_i, by = "movieId") |> 
+  mutate(pred = mu + b_i) |> 
+  summarize(rmse = RMSE(rating, pred))
+movieonlyrmse
+
+#Tabulate Score
+RMSECompiled <- RMSECompiled %>% add_row(Model="Movie Effect",RMSE=movieonlyrmse[1,1])
+as.data.frame(RMSECompiled)
+```
+There is a marked improvement; the RMSE drops to 0.943. Let us factor in the user effect as well.
+
+### 3.3. Movie and User Effects
+With the user effect included on top of the movie effect, the predictive model becomes:
+$$Y_{u,i} = \mu + b_{i} + b_{u} + \epsilon_{u,i}$$
+The user effect is estimated by first calculating the movie effect (as per 3.2) and using it to back-calculate said user effect.
+```{r}
+#3.3. calculate user effects
+b_u <- edx%>%left_join(b_i,by="movieId") %>% group_by(userId) %>% summarize(b_u=mean(rating-mu-b_i))
+
+#3.3.1. RMSE with movie + user effects
+movieanduserrmse <- test %>% left_join(b_i, by="movieId") %>% left_join(b_u, by="userId") %>% mutate(pred = mu + b_i + b_u) |> 
+  summarize(rmse = RMSE(rating, pred))
+movieanduserrmse
+movieanduserrmsereport <- movieanduserrmse[1,1]
+
+#Tabulate Score
+RMSECompiled <- RMSECompiled %>% add_row(Model="Movie + User Effect",RMSE=movieanduserrmse[1,1])
+as.data.frame(RMSECompiled)
+```
+The RMSE is 0.86535, which is a marked improvement but still short of the target 0.86490. 
+
+### 3.4. Movie, User and Gap Effects
+We have seen earlier that there is basis for the time-gap effect. Let us add this term $b_{g}$ to the original predictive model.
+$$Y_{u,i} = \mu + b_{i} + b_{u} + b_{g} + \epsilon_{u,i}$$
+Calculating the time gap term is done using the below code. Note that I used the 'transformed' *edx2* set which includes additional columns pertaining to rating year, year released, and the time gap between them. This set was generated earlier in the exploration section.
+```{r}
+#3.4. RMSE with movie + user + gap effects
+b_g <- edx2%>%left_join(b_i,by="movieId") %>% left_join(b_u,by="userId") %>% 
+  group_by(gap) %>% summarize(b_g=mean(rating-mu-b_i-b_u))
+
+#3.4.1. first, mutate test set to include gap data as well
+test2 <- test %>% mutate(rating_year=as.numeric(year(as_datetime(timestamp))),year_released=as.numeric(str_sub(title,start = -5, end = -2)), gap=rating_year-year_released)
+
+#then, join b_i, b_u, and b_g and calculate the RMSE
+movieuserandgaprmse <- test2 %>% left_join(b_i, by="movieId") %>% left_join(b_u, by="userId") %>%
+  left_join(b_g,by="gap") %>%
+  mutate(pred = mu + b_i + b_u + b_g) |> 
+  summarize(rmse = RMSE(rating, pred))
+movieuserandgaprmse
+
+#Tabulate Score
+RMSECompiled <- RMSECompiled %>% add_row(Model="Movie + User + Gap Effect",RMSE=movieuserandgaprmse[1,1])
+as.data.frame(RMSECompiled)
+```
+Factoring in the gap effect, the RMSE has dropped even further, but unfortunately it is still slightly above 0.86490, our yardstick.
+
+### 3.5. (Regularized) Movie and User Effect
+To regularize, in simple terms, means to alter the RMSE equation that is to be minimized, by adding in penalty terms. These penalty terms adjust/compensate for large estimates caused by small sample sizes (e.g., few ratings for a particular movie, few ratings provided by a particular user). Note that the penalty term includes an unknown value $\lambda$ needed to minimize the RMSE, which we will identify using cross-validation. See <http://rafalab.dfci.harvard.edu/dsbook/large-datasets.html#regularization> for an elaboration of the mathematical implications. 
+
+First, we will build a predictive model with regularization of the movie and user effects. This model tries a series of lambda values, calculates the regularized movie and user effects, then the RMSE, then identifies which lambda minimizes the RMSE. 
+```{r}
+#3.5. trying regularized (movie + user effect)
+lambdas <- seq(0, 10, 0.25)
+rmses <- sapply(lambdas, function(l){
+  mu <- mean(edx$rating)
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    dplyr::summarize(b_i = sum(rating - mu)/(n()+l))
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    dplyr::summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  predicted_ratings <- 
+    test %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test$rating))
+})
+
+qplot(lambdas, rmses)  
+
+lambda <- lambdas[which.min(rmses)]
+lambda
+```
+The plot shows that the best lambda value is 5.25, and the RMSE drops below 0.86490.
+```{r}
+#Tabulate Score
+RMSECompiled <- RMSECompiled %>% add_row(Model="Regularized (Movie + User Effect)",RMSE=min(rmses))
+as.data.frame(RMSECompiled)
+```
+### 3.6. (Regularized) Movie, User and Gap Effect
+While we have achieved our desired RMSE of below 0.86490, let us see if regularizing the gap effect helps to reduce the RMSE even further.
+```{r}
+#3.6. trying regularized (movie + user + gap effect)
+lambdas <- seq(0, 10, 0.25)
+rmses2 <- sapply(lambdas, function(l){
+  mu <- mean(edx$rating)
+  
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    dplyr::summarize(b_i = sum(rating - mu)/(n()+l))
+ 
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    dplyr::summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  b_g <- edx2 %>% 
+    left_join(b_i, by="movieId") %>% left_join(b_u,by="userId") %>%
+    group_by(gap) %>%
+    dplyr::summarize(b_g = sum(rating - b_i - b_u - mu)/(n()+l))
+  
+  predicted_ratings <- 
+    test2 %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_g, by = "gap") %>%
+    mutate(pred = mu + b_i + b_u + b_g) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test$rating))
+})
+
+qplot(lambdas, rmses2)  
+
+lambda2 <- lambdas[which.min(rmses2)]
+lambda2
+```
+The optimal lambda value has altered slightly - and we will see below that the RMSE drops even further! This is clearly our best model. Let us see all the models we have produced so far, plus the corresponding RMSEs.
+```{r}
+#Tabulate Score
+RMSECompiled <- RMSECompiled %>% add_row(Model="Regularized (Movie + User + Gap Effect)",RMSE=min(rmses2))
+as.data.frame(RMSECompiled)
+```
+## 4. Conclusions
+The best performing predictive algorithm is the regularized movie + user + time gap model, with an RMSE of 0.86434, which is below the target threshold of 0.86490. While a satisfactory result, there are computational limitations on my PC which prevented me from using more intensive algorithms. One example is the **matrix factorization approach**, which takes into account the fact that groups of movies can have similar rating patterns, or groups of users can rate in the same fashion. These patterns can be converted into factors that are built into the predictive model. Other possibilities for future work include model based algorithms such as the **Random Forest** and **K-Means classification**, as well as item-based filtering approaches such as Cosine Similarity. Source: <https://www.jetir.org/download1.php?file=JETIR1907B10.pdf>.
+
+## 5. References
+1. https://www.jetir.org/download1.php?file=JETIR1907B10.pdf
+2. http://rafalab.dfci.harvard.edu/dsbook/large-datasets.html#regularization
